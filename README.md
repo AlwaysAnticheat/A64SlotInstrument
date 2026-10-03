@@ -39,7 +39,7 @@ table and an indirect `BR Xn`.**
 - [API reference](#api-reference)
 - [Captured register state](#captured-register-state)
 - [Threading model](#threading-model)
-- [Limits](#limits)
+- [To do](#to-do)
 - [Project layout](#project-layout)
 - [Testing](#testing)
 - [License](#license)
@@ -396,57 +396,32 @@ a code pointer. We never touch the binary's code — we only edit one row.
 
 ### 2. Sequence — who talks to whom, in order
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App  as Target binary
-    participant Slot as .data slot<br/>(e.g. 0x2967A8)
-    participant Stub as Our RX stub<br/>(40 B, BTI-safe)
-    participant Entry as Entry (asm)<br/>register spill
-    participant Cb   as Your callback<br/>(C++)
-    participant Orig as Original function<br/>(sub_A7980)
-
-    App->>Slot: LDR X10, [slot addr]
-    Note over Slot: Slot now points at Stub<br/>(we swapped it)
-    App->>Stub: BR X10
-    Stub->>Entry: BTI JC · save X16/X17 · BR x17
-    Entry->>Entry: Spill X0..X29, LR, V0..V31,<br/>NZCV, FPCR, FPSR
-    Entry->>Cb: Call user callback with RegisterContext
-
-    alt callback returns CallOriginal
-        Cb-->>Entry: Action::CallOriginal
-        Entry->>Orig: Restore state · BR Entry->Original
-        Orig-->>App: normal return via LR
-    else callback returns ReturnZero
-        Cb-->>Entry: Action::ReturnZero
-        Entry-->>App: Restore state · X0 = 0 · RET via LR
-    end
-```
+<p align="center">
+  <a href="docs/images/sequence-dark.svg" title="Click to open full-size (pan + zoom in your browser)">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/sequence-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/images/sequence-light.svg">
+      <img alt="Sequence: target → slot → stub → entry → dispatch → callback → CallOriginal or ReturnZero" src="docs/images/sequence-light.svg" width="100%">
+    </picture>
+  </a>
+  <br>
+  <sub><i>Click the diagram to open it full-size — browser native pan + zoom.</i></sub>
+</p>
 
 ### 3. Detailed flowchart
 
 <details>
-<summary><b>Full control-flow graph (click to expand)</b></summary>
+<summary><b>Full control-flow graph (click to expand — image is clickable for full-size)</b></summary>
 
-```mermaid
-flowchart TD
-    A["Dispatcher inside the target<br/><code>LDR X10, [X9, W_idx, UXTW#3]</code><br/><code>BR X10</code>"] -->|loads the pointer we swapped| B["<b>.data slot</b><br/>e.g. <code>0x2967A8</code>"]
-    B --> C["<b>Per-slot stub</b> (RX, 40 B, PIC literal pool)<br/><code>BTI JC</code><br/><code>STP x16, x17, [sp, #-16]!</code><br/><code>LDR x16, hook_literal</code><br/><code>LDR x17, dispatcher_literal</code><br/><code>BR x17</code>"]
-    C --> D["<b>A64SlotInstrumentEntry</b> (asm)<br/>reserve frame · spill X0..X29, LR, V0..V31,<br/>NZCV, FPCR, FPSR · reconstruct caller SP"]
-    D --> E["<b>A64SlotInstrumentDispatch</b> (C++)<br/>fill Context.HookAddress / Original / PC"]
-    E --> F{"<b>Your callback</b><br/>reads any X[i], V[i], LR, SP, X29, flags"}
-    F -->|<b>CallOriginal</b>| G["Restore every register<br/>restore x16/x17<br/><code>BR Entry->Original</code> → real target"]
-    F -->|<b>ReturnZero</b>| H["Restore every register<br/><code>x0 = 0</code><br/><code>RET</code> via caller's LR"]
-
-    classDef target fill:#2b2d31,stroke:#5865f2,color:#f2f3f5,stroke-width:1px;
-    classDef ours   fill:#1e3a5f,stroke:#58a6ff,color:#f2f3f5,stroke-width:1px;
-    classDef user   fill:#3d2b4e,stroke:#bb86fc,color:#f2f3f5,stroke-width:1px;
-    classDef exit   fill:#1f3d2c,stroke:#3fb950,color:#f2f3f5,stroke-width:1px;
-    class A,B target
-    class C,D,E ours
-    class F user
-    class G,H exit
-```
+<p align="center">
+  <a href="docs/images/flowchart-dark.svg" title="Click to open full-size (pan + zoom in your browser)">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/flowchart-dark.svg">
+      <source media="(prefers-color-scheme: light)" srcset="docs/images/flowchart-light.svg">
+      <img alt="Full control-flow graph" src="docs/images/flowchart-light.svg" width="70%">
+    </picture>
+  </a>
+</p>
 
 </details>
 
@@ -641,19 +616,31 @@ assembly entry addresses every field by constant offset.
   can execute the slot. A64SlotInstrument does not provide stop-the-world
   synchronization for live threads already inside the target.
 
-## Limits
+## To do
 
-- Preserves GPRs, `NZCV`, `FPCR`, `FPSR`, and all 32 128-bit SIMD/NEON
-  V-regs. Does **not** save/restore scalable SVE / SME state (`Z*`, `P*`,
-  `FFR`, ZA). A separate SVE/SME trampoline would be needed if your hooked
-  path uses those extensions.
-- **PAC-signed slots (arm64e)** are not transparently supported. The
-  stored slot pointer must be callable with a plain `BR` — i.e., either
-  the target is arm64 (not arm64e), or the specific slot the obfuscator /
-  compiler emitted is unsigned. For a signed slot you must authenticate
-  the stub address under the matching key and discriminator before
-  publishing it.
-- Only AArch64. 32-bit ARM, x86, and x86_64 are not supported.
+Roadmap for things not yet implemented. Each one is scoped and open for
+contributions.
+
+- [ ] **SVE / SME trampoline.** The current entry preserves GPRs, `NZCV`,
+      `FPCR`, `FPSR`, and all 32 128-bit SIMD/NEON V-regs, but not the
+      scalable `Z*`, `P*`, `FFR`, or ZA state. Add a second entry variant
+      that spills and restores scalable vectors when the hooked path
+      actually uses SVE / SME.
+- [ ] **arm64e PAC support.** For slots the target stores via `PACDA` and
+      consumes via `BRAA`/`BLRAA`, sign the stub address under the
+      matching key + discriminator before publishing it, and strip the
+      PAC when forwarding to `Original`. Right now the slot pointer must
+      be callable with a plain `BR`, which covers plain arm64 and the
+      unsigned subset of arm64e slots.
+- [ ] **Uninstall / rebind.** `Instrument` is one-shot; add a counterpart
+      that atomically restores the slot's original pointer and tears down
+      the stub page.
+- [ ] **Batch install.** For hundreds of slots in one obfuscated
+      dispatch table, pool the stubs onto fewer RX pages and install
+      them under one CAS cycle.
+- [ ] **32-bit ARM / x86 / x86_64 ports.** Not planned; the whole stub
+      design is ARM64-specific. File an issue if you have a concrete use
+      case.
 
 ## Project layout
 
