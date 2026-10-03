@@ -28,8 +28,10 @@ table and an indirect `BR Xn`.**
 ## Table of contents
 
 - [Features](#features)
-- [Why — obfuscated indirect-branch dispatch](#why--obfuscated-indirect-branch-dispatch)
-- [How it works](#how-it-works)
+- [What you can hook](#what-you-can-hook)
+  - [Case 1 — normal slot replacement](#case-1--normal-slot-replacement)
+  - [Case 2 — obfuscated indirect-branch dispatch](#case-2--obfuscated-indirect-branch-dispatch)
+- [How it works (mental model → sequence → details)](#how-it-works-mental-model--sequence--details)
 - [Platform support](#platform-support)
 - [Build](#build)
 - [Quick start](#quick-start)
@@ -54,12 +56,101 @@ table and an indirect `BR Xn`.**
 | **Signature-agnostic** | Because the whole register file is forwarded, the framework does not need to know the target's C/C++ signature. |
 | **Shortcut-return** | `Action::ReturnZero` restores register state, clears `X0`, and returns to the caller without executing the original. |
 
-## Why — obfuscated indirect-branch dispatch
+## What you can hook
 
-A64SlotInstrument exists for one specific reversing problem: **an obfuscated
+Anywhere a function pointer **sits in RW memory and gets dialed through an
+indirect branch** — that's a slot you can replace. The library is useful
+for two very different jobs. The second one (obfuscated dispatch) was the
+original motivation, but the first one (plain callback tables) is just as
+practical and much easier to explain.
+
+### Case 1 — normal slot replacement
+
+The everyday case: a C or C++ program keeps a **table of callbacks** in a
+global, and some loop later reads one of them and calls it. Audio engines,
+scripting bridges, plugin registries, game-engine update loops, and
+C-style vtables all look like this.
+
+Imagine an audio engine with a global effects table:
+
+```cpp
+struct AudioEffect {
+    const char *Name;
+    void (*Process)(float *Samples, size_t Count);   // <-- the slot
+};
+
+static AudioEffect g_Effects[] = {
+    { "reverb",     reverb_process     },
+    { "distortion", distortion_process },
+    { "lowpass",    lowpass_process    },
+};
+```
+
+When the mixer wants to run `reverb`, the compiler emits something like
+this at the call site:
+
+```asm
+; AArch64 call site inside the mixer:
+ADRP   X8,  g_Effects@PAGE          ; address of the table
+ADD    X8,  X8, g_Effects@PAGEOFF
+LDR    X9,  [X8, #8]                ; load .Process (the SLOT) → X9
+MOV    X0,  samples_ptr             ; arg0: float *Samples
+MOV    X1,  samples_count           ; arg1: size_t Count
+BLR    X9                           ; indirect call — ENTERS OUR STUB
+```
+
+Hook that slot with one line:
+
+```cpp
+static A64SlotInstrument::Action OnReverbProcess(
+    const A64SlotInstrument::RegisterContext &Ctx)
+{
+    float  *Samples = reinterpret_cast<float *>(Ctx.X[0]);
+    size_t  Count   = static_cast<size_t>(Ctx.X[1]);
+
+    float Peak = 0.0f;
+    for (size_t i = 0; i < Count && i < 64; ++i) {
+        float a = Samples[i] < 0 ? -Samples[i] : Samples[i];
+        if (a > Peak) Peak = a;
+    }
+    g_LastReverbPeak = Peak;     // observe the audio without blocking it
+    g_ReverbCallCount++;
+
+    return A64SlotInstrument::Action::CallOriginal;  // let reverb run
+}
+
+void InstallReverbMonitor()
+{
+    // &g_Effects[0].Process is the writable function-pointer slot.
+    A64SlotInstrument::Instrument(
+        reinterpret_cast<uintptr_t>(&g_Effects[0].Process),
+        OnReverbProcess);
+}
+```
+
+What you get for free:
+
+- Every integer / pointer arg via `X[0..7]`.
+- Every floating-point / vector arg via `V[0..7]` (`float`, `double`, and
+  SIMD lanes).
+- The caller's `LR`, `SP`, and `X29` for a one-shot backtrace.
+- Full status registers (`NZCV`, `FPCR`, `FPSR`) so you can tell whether
+  the call raised an IEEE exception while you were watching.
+- A clean `ReturnZero` to short-circuit the call entirely (handy for
+  disabling a feature at a seam without recompiling).
+
+> [!TIP]
+> If your target is C++ and the vtable happens to live in RW memory, the
+> same trick hooks a virtual method call. Many engines generate per-object
+> vtables at runtime (ECS, scripting, reflection) and those always land in
+> `__DATA`.
+
+### Case 2 — obfuscated indirect-branch dispatch
+
+The harder case A64SlotInstrument was originally built for: **an obfuscated
 AArch64 binary whose "functions" aren't really functions.** The obfuscator
-breaks each logical routine into dozens of small basic blocks and glues them
-together through a `.data` dispatch table and an indirect `BR Xn`.
+breaks each logical routine into dozens of small basic blocks and glues
+them together through a `.data` dispatch table and an indirect `BR Xn`.
 
 > [!NOTE]
 > IDA sees each basic block as its own `sub_XXXX`. In reality, those "subs"
@@ -81,14 +172,26 @@ __text:A7978   LDR   X10, [X9, W10, UXTW#3]    ; load next block pointer
 __text:A797C   BR    X10                       ; indirect branch
 ```
 
-And in `.data` sits the table of per-block entries:
+And in `.data` sits the actual table of per-block entries — this is the
+real dispatch table from the binary that motivated the library:
 
 ```
-__data:002967A8   off_2967A8   DCQ sub_A7980   ; <-- the slot we hook
-__data:00296798                DCQ sub_A79A8
-__data:00296788                DCQ sub_A79DC
-                               ; ...hundreds more...
+__data:00296760  off_296760   DCQ loc_A7A28     ; DATA XREF: sub_A78D4+9C
+__data:00296768               DCQ loc_A7A2C
+__data:00296770               DCQ sub_A7A24
+__data:00296778               DCQ loc_A79EC
+__data:00296780               DCQ loc_A79EC
+__data:00296788               DCQ sub_A79DC
+__data:00296790               DCQ sub_A78D4
+__data:00296798               DCQ sub_A79A8
+__data:002967A0               DCQ loc_A7A00
+__data:002967A8               DCQ sub_A7980     ; <-- the slot we hook
 ```
+
+Every row is 8 bytes of RW memory holding a code pointer the dispatcher
+will load with `LDR X10, [X9, W_idx, UXTW#3]` and branch to with `BR X10`.
+Overwrite one row atomically with the stub address and that specific
+branch destination becomes "you".
 
 <details>
 <summary><b>Full disassembly excerpt (click to expand)</b></summary>
@@ -242,16 +345,97 @@ void InstallBlockHook(uintptr_t ModuleBase)
 }
 ```
 
-## How it works
+## How it works (mental model → sequence → details)
+
+Three layers, roughest to most precise. Read the first one and you already
+have the right picture; keep going if you want the mechanism.
+
+### 1. Mental model — a swapped page in a phone book
+
+Imagine the target binary carries a **phone book**. Every time it wants to
+call someone, it looks up a page in the phone book, reads the number, and
+dials. We tear out one page, write our own number on it, and put the page
+back. Now when the binary dials that page, **it reaches us** — we see
+exactly what it wanted to say, and we can either forward the call to the
+original number or politely hang up and tell it "nobody answered".
+
+The phone book is the `.data` dispatch table. Each row is 8 bytes holding
+a code pointer. We never touch the binary's code — we only edit one row.
+
+```text
+   BEFORE                               AFTER A64SlotInstrument
+   ──────                               ──────────────────────
+
+   ┌────────────┐                       ┌────────────┐
+   │   caller   │                       │   caller   │
+   └──────┬─────┘                       └──────┬─────┘
+          │  LDR X10, [slot]                   │  LDR X10, [slot]
+          │  BR  X10                           │  BR  X10
+          ▼                                    ▼
+   ┌────────────┐                       ┏━━━━━━━━━━━━┓
+   │ real func  │                       ┃ OUR STUB   ┃  ← page we swapped
+   │ sub_A7980  │                       ┃ 40 bytes   ┃
+   └────────────┘                       ┗━━━━━┳━━━━━━┛
+                                              │  saves every register
+                                              ▼
+                                       ┌────────────┐
+                                       │ YOUR C++   │
+                                       │  callback  │  ← reads X[*], V[*],
+                                       └──────┬─────┘    LR, SP, FPCR, …
+                                              │
+                              ┌───────────────┴───────────────┐
+                              │                               │
+                      CallOriginal                      ReturnZero
+                              │                               │
+                              ▼                               ▼
+                       ┌────────────┐                 ┌───────────────┐
+                       │ real func  │                 │ caller gets   │
+                       │ sub_A7980  │                 │ X0 = 0, RET   │
+                       └────────────┘                 └───────────────┘
+```
+
+### 2. Sequence — who talks to whom, in order
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App  as Target binary
+    participant Slot as .data slot<br/>(e.g. 0x2967A8)
+    participant Stub as Our RX stub<br/>(40 B, BTI-safe)
+    participant Entry as Entry (asm)<br/>register spill
+    participant Cb   as Your callback<br/>(C++)
+    participant Orig as Original function<br/>(sub_A7980)
+
+    App->>Slot: LDR X10, [slot addr]
+    Note over Slot: Slot now points at Stub<br/>(we swapped it)
+    App->>Stub: BR X10
+    Stub->>Entry: BTI JC · save X16/X17 · BR x17
+    Entry->>Entry: Spill X0..X29, LR, V0..V31,<br/>NZCV, FPCR, FPSR
+    Entry->>Cb: Call user callback with RegisterContext
+
+    alt callback returns CallOriginal
+        Cb-->>Entry: Action::CallOriginal
+        Entry->>Orig: Restore state · BR Entry->Original
+        Orig-->>App: normal return via LR
+    else callback returns ReturnZero
+        Cb-->>Entry: Action::ReturnZero
+        Entry-->>App: Restore state · X0 = 0 · RET via LR
+    end
+```
+
+### 3. Detailed flowchart
+
+<details>
+<summary><b>Full control-flow graph (click to expand)</b></summary>
 
 ```mermaid
 flowchart TD
-    A["Obfuscated dispatcher<br/><code>LDR X10, [X9, W_idx, UXTW#3]</code><br/><code>BR X10</code>"] -->|loads the pointer we swapped| B["<b>.data slot</b><br/>e.g. <code>0x2967A8</code>"]
+    A["Dispatcher inside the target<br/><code>LDR X10, [X9, W_idx, UXTW#3]</code><br/><code>BR X10</code>"] -->|loads the pointer we swapped| B["<b>.data slot</b><br/>e.g. <code>0x2967A8</code>"]
     B --> C["<b>Per-slot stub</b> (RX, 40 B, PIC literal pool)<br/><code>BTI JC</code><br/><code>STP x16, x17, [sp, #-16]!</code><br/><code>LDR x16, hook_literal</code><br/><code>LDR x17, dispatcher_literal</code><br/><code>BR x17</code>"]
     C --> D["<b>A64SlotInstrumentEntry</b> (asm)<br/>reserve frame · spill X0..X29, LR, V0..V31,<br/>NZCV, FPCR, FPSR · reconstruct caller SP"]
     D --> E["<b>A64SlotInstrumentDispatch</b> (C++)<br/>fill Context.HookAddress / Original / PC"]
     E --> F{"<b>Your callback</b><br/>reads any X[i], V[i], LR, SP, X29, flags"}
-    F -->|<b>CallOriginal</b>| G["Restore every register<br/>restore x16/x17<br/><code>BR Entry->Original</code> → real <code>sub_A7980</code>"]
+    F -->|<b>CallOriginal</b>| G["Restore every register<br/>restore x16/x17<br/><code>BR Entry->Original</code> → real target"]
     F -->|<b>ReturnZero</b>| H["Restore every register<br/><code>x0 = 0</code><br/><code>RET</code> via caller's LR"]
 
     classDef target fill:#2b2d31,stroke:#5865f2,color:#f2f3f5,stroke-width:1px;
@@ -263,6 +447,8 @@ flowchart TD
     class F user
     class G,H exit
 ```
+
+</details>
 
 <details>
 <summary><b>Byte-level stub (click to expand)</b></summary>
