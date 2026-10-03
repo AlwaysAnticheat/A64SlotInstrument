@@ -304,9 +304,30 @@ slot is published.
 |---|---|
 | Android AArch64 (API 23+) | ✅ Primary target |
 | Linux AArch64             | ✅ Supported |
-| macOS arm64               | 🟡 Host tests only — the slot-writable assumption rarely holds for shipping Mach-O binaries |
-| iOS arm64                 | ❌ Code-signing / pointer auth prevent slot swap |
+| **iOS arm64 (non-jailbroken)** | ✅ **Supported — tested in production** |
+| macOS arm64               | ✅ Host tests + usable on binaries with RW `__DATA` dispatch tables |
+| iOS/macOS arm64e (PAC)    | 🟡 Only for slots the target stores **unsigned**. See the PAC note below. |
 | 32-bit ARM, x86, x86_64   | ❌ Not supported |
+
+> [!NOTE]
+> **Why iOS non-JB works.** On iOS the Mach-O `__DATA` segment ships RW
+> by default — writing a qword into a dispatch-table slot is a plain store
+> and needs no `mprotect`, no entitlement, and no jailbreak. The iOS
+> sandbox restricts filesystem and IPC, not in-process memory writes to
+> pages the loader already mapped RW. The stub's own RX page is a
+> separate concern that depends on your deployment surface (debuggable
+> process, TrollStore-class install, dev-entitled build, etc.).
+
+> [!WARNING]
+> **arm64e / pointer-authentication caveat.** On arm64e, pointers stored
+> through `PACDA` and consumed by `BRAA`/`BLRAA` are signed. Swapping the
+> raw slot value would authenticate incorrectly and trap. In practice
+> many third-party iOS binaries still ship as arm64 (not arm64e), and
+> even arm64e binaries only sign a subset of data pointers — the
+> obfuscator-generated `LDR / BR Xn` dispatch pattern this library
+> targets is typically unsigned, which is why the production iOS test
+> works. If your target slot is PAC-signed, you need to sign the stub
+> address under the same key/discriminator before writing it.
 
 An AArch64 toolchain (`aarch64-linux-gnu-*`, Android NDK, or
 `clang -target aarch64-linux-android`) is required to build the library;
@@ -440,8 +461,12 @@ assembly entry addresses every field by constant offset.
   V-regs. Does **not** save/restore scalable SVE / SME state (`Z*`, `P*`,
   `FFR`, ZA). A separate SVE/SME trampoline would be needed if your hooked
   path uses those extensions.
-- **Pointer authentication is out of scope.** The pointer stored in the
-  slot must be directly callable with `BR`.
+- **PAC-signed slots (arm64e)** are not transparently supported. The
+  stored slot pointer must be callable with a plain `BR` — i.e., either
+  the target is arm64 (not arm64e), or the specific slot the obfuscator /
+  compiler emitted is unsigned. For a signed slot you must authenticate
+  the stub address under the matching key and discriminator before
+  publishing it.
 - Only AArch64. 32-bit ARM, x86, and x86_64 are not supported.
 
 ## Project layout
