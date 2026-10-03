@@ -1,0 +1,47 @@
+# macOS
+.DS_Store
+._*
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build output
+build/
+build-*/
+cmake-build-*/
+out/
+dist/
+tests/build-host/
+tests/build-aarch64/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Compiler artifacts
+*.o
+*.obj
+*.a
+*.lo
+*.la
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# Debug info
+*.dSYM/
+*.pdb
+*.ilk
+
+# Python caches used by tests/*.py
+__pycache__/
+*.pyc
