@@ -11,7 +11,7 @@
 
 namespace
 {
-    const char *const kBlockedNames[] = {
+    const char *const BlockedNames[] = {
         "mrpcsGR",
         "diag_dump",
         "crash_report_submit",
@@ -22,7 +22,7 @@ namespace
         if (!Name)
             return false;
 
-        for (const char *Needle : kBlockedNames)
+        for (const char *Needle : BlockedNames)
         {
             if (strstr(Name, Needle))
                 return true;

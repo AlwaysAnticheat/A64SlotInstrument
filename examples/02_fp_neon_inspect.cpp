@@ -18,15 +18,15 @@
 
 namespace
 {
-    constexpr uint64_t kFPSR_IOC = 1ull << 0;
-    constexpr uint64_t kFPSR_DZC = 1ull << 1;
-    constexpr uint64_t kFPSR_OFC = 1ull << 2;
-    constexpr uint64_t kFPSR_UFC = 1ull << 3;
-    constexpr uint64_t kFPSR_IXC = 1ull << 4;
-    constexpr uint64_t kFPSR_IDC = 1ull << 7;
+    constexpr uint64_t FPSR_IOC = 1ull << 0;
+    constexpr uint64_t FPSR_DZC = 1ull << 1;
+    constexpr uint64_t FPSR_OFC = 1ull << 2;
+    constexpr uint64_t FPSR_UFC = 1ull << 3;
+    constexpr uint64_t FPSR_IXC = 1ull << 4;
+    constexpr uint64_t FPSR_IDC = 1ull << 7;
 
-    constexpr uint64_t kFPSR_AllExceptions =
-        kFPSR_IOC | kFPSR_DZC | kFPSR_OFC | kFPSR_UFC | kFPSR_IXC | kFPSR_IDC;
+    constexpr uint64_t FPSR_AllExceptions =
+        FPSR_IOC | FPSR_DZC | FPSR_OFC | FPSR_UFC | FPSR_IXC | FPSR_IDC;
 
     struct VectorSnapshot
     {
@@ -51,7 +51,7 @@ namespace
         LastVectorArgument.store(Snapshot, std::memory_order_relaxed);
 
         LastFPCR.store(Context.FPCR, std::memory_order_relaxed);
-        LastFPExceptionMask.store(Context.FPSR & kFPSR_AllExceptions,
+        LastFPExceptionMask.store(Context.FPSR & FPSR_AllExceptions,
                                   std::memory_order_relaxed);
 
         return A64SlotInstrument::Action::CallOriginal;

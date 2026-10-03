@@ -79,10 +79,10 @@ struct AudioEffect {
     void (*Process)(float *Samples, size_t Count);   // <-- the slot
 };
 
-static AudioEffect g_Effects[] = {
-    { "reverb",     reverb_process     },
-    { "distortion", distortion_process },
-    { "lowpass",    lowpass_process    },
+static AudioEffect Effects[] = {
+    { "reverb",     ReverbProcess     },
+    { "distortion", DistortionProcess },
+    { "lowpass",    LowpassProcess    },
 };
 ```
 
@@ -91,11 +91,11 @@ this at the call site:
 
 ```asm
 ; AArch64 call site inside the mixer:
-ADRP   X8,  g_Effects@PAGE          ; address of the table
-ADD    X8,  X8, g_Effects@PAGEOFF
+ADRP   X8,  Effects@PAGE            ; address of the table
+ADD    X8,  X8, Effects@PAGEOFF
 LDR    X9,  [X8, #8]                ; load .Process (the SLOT) → X9
-MOV    X0,  samples_ptr             ; arg0: float *Samples
-MOV    X1,  samples_count           ; arg1: size_t Count
+MOV    X0,  SamplesPtr              ; arg0: float *Samples
+MOV    X1,  SamplesCount            ; arg1: size_t Count
 BLR    X9                           ; indirect call — ENTERS OUR STUB
 ```
 
@@ -113,17 +113,17 @@ static A64SlotInstrument::Action OnReverbProcess(
         float a = Samples[i] < 0 ? -Samples[i] : Samples[i];
         if (a > Peak) Peak = a;
     }
-    g_LastReverbPeak = Peak;     // observe the audio without blocking it
-    g_ReverbCallCount++;
+    LastReverbPeak = Peak;       // observe the audio without blocking it
+    ReverbCallCount++;
 
     return A64SlotInstrument::Action::CallOriginal;  // let reverb run
 }
 
 void InstallReverbMonitor()
 {
-    // &g_Effects[0].Process is the writable function-pointer slot.
+    // &Effects[0].Process is the writable function-pointer slot.
     A64SlotInstrument::Instrument(
-        reinterpret_cast<uintptr_t>(&g_Effects[0].Process),
+        reinterpret_cast<uintptr_t>(&Effects[0].Process),
         OnReverbProcess);
 }
 ```

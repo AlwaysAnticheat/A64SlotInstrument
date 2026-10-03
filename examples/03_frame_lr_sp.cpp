@@ -22,7 +22,7 @@
 
 namespace
 {
-    constexpr size_t kBacktraceDepth = 4;
+    constexpr size_t BacktraceDepth = 4;
 
     struct CallSiteRecord
     {
@@ -30,7 +30,7 @@ namespace
         uintptr_t ReturnAddress;
         uintptr_t StackPointer;
         uintptr_t FramePointer;
-        uintptr_t Backtrace[kBacktraceDepth];
+        uintptr_t Backtrace[BacktraceDepth];
     };
 
     std::atomic<CallSiteRecord> LastCallSite;
@@ -54,7 +54,7 @@ namespace
         Record.FramePointer  = Context.X[29];
 
         uintptr_t Fp = Context.X[29];
-        for (size_t Depth = 0; Depth < kBacktraceDepth; ++Depth)
+        for (size_t Depth = 0; Depth < BacktraceDepth; ++Depth)
         {
             if (!LooksLikeFrame(Fp, Context.SP))
                 break;
