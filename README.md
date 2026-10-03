@@ -27,10 +27,12 @@ instructions.
 ## Table of contents
 
 - [Features](#features)
+- [Motivation — obfuscated indirect-branch dispatch](#motivation--obfuscated-indirect-branch-dispatch)
 - [When to use this (and when not to)](#when-to-use-this-and-when-not-to)
 - [Platform support](#platform-support)
 - [Build](#build)
 - [Quick start](#quick-start)
+- [Control flow at runtime](#control-flow-at-runtime)
 - [Examples](#examples)
 - [API reference](#api-reference)
 - [Captured register state](#captured-register-state)
@@ -62,6 +64,116 @@ instructions.
   function.
 - **Shortcut-return path.** `Action::ReturnZero` restores register state,
   clears `X0`, and returns to the caller without executing the original.
+
+## Motivation — obfuscated indirect-branch dispatch
+
+A64SlotInstrument came out of a very specific reversing problem: **a
+heavily obfuscated AArch64 binary whose "functions" aren't really
+functions.** The obfuscator breaks each logical routine into dozens of
+small basic blocks and glues them together through a `.data` dispatch
+table and an indirect `BR Xn`. Every block ends with something like:
+
+```asm
+__text:00000000000A78D4 sub_A78D4
+__text:00000000000A78D4   SUB   SP, SP, #0x70
+__text:00000000000A78D8   STP   X26, X25, [SP,#0x60+var_40]
+                          ; ... normal prologue + state setup ...
+__text:00000000000A7940   LDR   X8, [X19,#0x60]!
+__text:00000000000A7944   MOV   W9,  #0x174A0DDA
+__text:00000000000A794C   ORR   W10, W9, #4
+__text:00000000000A7950   EOR   W9,  W10, W9
+__text:00000000000A7954   MOV   W10, #0xC3C52265
+__text:00000000000A795C   ADD   W11, W10, #7
+__text:00000000000A7960   STP   W11, W10, [SP,#0x60+var_48]
+__text:00000000000A7964   EOR   W10, W11, W10
+__text:00000000000A7968   CMP   X8,  #0
+__text:00000000000A796C   CSEL  W10, W9, W10, EQ
+__text:00000000000A7970   ADRL  X9,  off_296760           ; <-- .data dispatch table
+__text:00000000000A7978   LDR   X10, [X9, W10, UXTW#3]    ; <-- pick next block
+__text:00000000000A797C   BR    X10                       ; <-- indirect branch
+
+__text:00000000000A7980 sub_A7980                         ; DATA XREF: __data:2967A8↓o
+__text:00000000000A7980   LDR   W10, [X8,#0x18]
+__text:00000000000A7984   ADD   W11, W22, #3
+__text:00000000000A7988   EOR   W11, W22, W11
+                          ; ... another CSEL, ADRL off_296760, BR X10 ...
+
+__text:00000000000A79A8 sub_A79A8                         ; DATA XREF: __data:296798↓o
+__text:00000000000A79A8   MOV   W10, #0x10
+__text:00000000000A79AC   MOV   W11, #8
+                          ; ... another CSEL, ADRL off_296760, BR X10 ...
+```
+
+And the corresponding dispatch table in `.data`:
+
+```
+__data:00000000002967A8 off_2967A8      DCQ sub_A7980   ; one BB entry
+__data:0000000000296798                 DCQ sub_A79A8   ; next BB entry
+__data:0000000000296788                 DCQ sub_A79DC   ; next BB entry
+                                        ; ... hundreds of entries ...
+```
+
+Each "function" IDA names (`sub_A7980`, `sub_A79A8`, `sub_A79DC`, …) is a
+basic block of the *same* logical routine, reached only through
+`BR X10` after the dispatcher resolves `off_296760[idx]`. That has two
+consequences for an instrumentation author:
+
+1. **Classic inline hooks don't apply here.** `sub_A7980` has no normal
+   prologue — the previous block already set up the frame. Patching the
+   first instruction would corrupt the shared register state (`X19`,
+   `X22`–`X25` are being used as rolling obfuscation keys across blocks).
+2. **The only stable, writable "handle" is the `.data` slot** that holds
+   the pointer the dispatcher is about to load with `LDR X10, [X9,...]`.
+   That slot is in RW memory. If you swap its contents for a pointer to
+   your own BTI-safe stub, you get called *in the middle of the obfuscated
+   routine*, with every register `X0..X29`, `LR`, `SP`, `NZCV`, `FPCR`,
+   `FPSR`, and `V0..V31` exactly as the previous block left them — and
+   you can read any of them.
+
+That is exactly what this library gives you. You pick a slot address
+(for example `0x2967A8` relative to the module base, pointing at
+`sub_A7980`), register a C++ callback, and the next time the dispatcher
+runs `BR X10` through that slot, control enters your callback with the
+full ARM64 register file captured and you can either forward to the
+original block or short-circuit the whole routine with `ReturnZero`.
+
+```cpp
+#include "A64SlotInstrument.h"
+
+// Called when the obfuscated dispatcher branches through .data:0x2967A8.
+// At entry, every X-register / V-register below is the live state the
+// previous basic block (sub_A78D4) left in flight.
+static A64SlotInstrument::Action OnBlockA7980(
+    const A64SlotInstrument::RegisterContext &Ctx)
+{
+    const uint64_t  ObfuscationKey = Ctx.X[22];     // rolling W22 key
+    const uint64_t  StructPointer  = Ctx.X[19];     // 'this'-like ptr
+    const uint64_t  LoadedWord     = Ctx.X[8];      // from LDR X8,[X19,#0x60]!
+
+    // Inspect, log, compare against our own model, etc.
+    if (LoadedWord == 0 && ObfuscationKey == 0x78FFFE3B)
+        return A64SlotInstrument::Action::ReturnZero;  // bail the whole routine
+
+    return A64SlotInstrument::Action::CallOriginal;    // let sub_A7980 run
+}
+
+void InstallBlockHook(uintptr_t ModuleBase)
+{
+    // 0x2967A8 is the .data slot that holds the pointer to sub_A7980.
+    A64SlotInstrument::Instrument(ModuleBase + 0x2967A8, &OnBlockA7980);
+}
+```
+
+The appeal of this approach for obfuscated binaries:
+
+- You never touch `.text`. No cache coherency games, no CFI/BTI-ABI
+  surprises on the hooked function, no risk of mis-decoding an
+  instruction stream the obfuscator has intentionally mangled.
+- You get **register-level introspection at an arbitrary point inside
+  the obfuscated control flow**, chosen by picking which `.data` slot to
+  swap.
+- The stub is PIC and self-contained, so you can install it at runtime
+  from an injected `.so` without touching the loader.
 
 ## When to use this (and when not to)
 
@@ -143,6 +255,69 @@ void InstallAt(uintptr_t ModuleBase)
 
 `SlotAddress` is the address of the **slot** that holds the function
 pointer, not the address of the function itself.
+
+## Control flow at runtime
+
+Here is what happens on a single call once a slot has been instrumented.
+Follow the arrows top-to-bottom; the dashed box is the per-slot stub
+A64SlotInstrument generates.
+
+```
+          Obfuscated dispatcher inside the target
+          ───────────────────────────────────────
+             ADRL  X9, off_296760
+             LDR   X10, [X9, W_idx, UXTW#3]   ; loads slot .data:0x..2967A8
+             BR    X10                        ; indirect branch
+                     │
+                     │   (slot's stored pointer no longer points at sub_A7980;
+                     │    A64SlotInstrument swapped it for the stub below)
+                     ▼
+     ┌──────────────────────────────────────────────────────┐
+     │  Per-slot stub (RX page, 40 bytes, PIC literal pool) │
+     │                                                      │
+     │   bti  jc                                            │
+     │   stp  x16, x17, [sp, #-16]!       ; preserve x16/x17│
+     │   ldr  x16, hook_literal           ; x16 = &Hook     │
+     │   ldr  x17, dispatcher_literal     ; x17 = &Entry    │
+     │   br   x17                                           │
+     └───────────────────────────┬──────────────────────────┘
+                                 │
+                                 ▼
+     A64SlotInstrumentEntry  (assembly, src/A64SlotInstrumentEntry.S)
+       1. Reserve a RegisterContext frame on the hooked stack.
+       2. Spill X0..X29, LR, NZCV, FPCR, FPSR, V0..V31.
+       3. Reconstruct the pre-stub SP and store it in Context.SP.
+                                 │
+                                 ▼
+     A64SlotInstrumentDispatch (C++, src/A64SlotInstrument.cpp)
+       Context.HookAddress = slot .data:0x..2967A8
+       Context.Original    = original pointer to sub_A7980
+       Context.PC          = this stub's address
+                                 │
+                                 ▼
+     YOUR CALLBACK  (A64SlotInstrument::Callback)
+       Reads any X[i], LR, SP, X29, V[i], FPCR, FPSR, NZCV it needs.
+       Returns Action::CallOriginal or Action::ReturnZero.
+            │                                              │
+    CallOriginal                                       ReturnZero
+            │                                              │
+            ▼                                              ▼
+     Reload every reg, restore x16/x17            Reload every reg,
+     from the stub's STP slot, then               set x0 = 0, then
+     BR Entry->Original  (= real sub_A7980).      RET via caller's LR.
+```
+
+Two things worth calling out:
+
+- The slot write that activates the hook is a single release-CAS from
+  the slot's original value to the stub's entry address. If another
+  thread raced us (the slot changed), install fails cleanly and nothing
+  is swapped.
+- `X16` / `X17` are the AArch64 intra-procedure-call scratch registers.
+  The stub saves them before using them so the callback sees the correct
+  caller values; on `CallOriginal`, `X16` necessarily carries the
+  indirect-branch target during the final `BR`, so the original block
+  observes the standard "X16 is scratch at call-site" ABI invariant.
 
 ## Examples
 
