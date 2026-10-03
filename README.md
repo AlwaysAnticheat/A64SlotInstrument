@@ -397,28 +397,28 @@ a code pointer. We never touch the binary's code — we only edit one row.
 ### 2. Sequence — who talks to whom, in order
 
 <p align="center">
-  <a href="docs/images/sequence-dark.svg" title="Click to open full-size (pan + zoom in your browser)">
+  <a href="https://raw.githubusercontent.com/AlwaysAnticheat/A64SlotInstrument/main/docs/images/sequence-dark.png">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/images/sequence-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/images/sequence-light.svg">
-      <img alt="Sequence: target → slot → stub → entry → dispatch → callback → CallOriginal or ReturnZero" src="docs/images/sequence-light.svg" width="100%">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/sequence-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/images/sequence-light.png">
+      <img alt="Sequence: target → slot → stub → entry → dispatch → callback → CallOriginal or ReturnZero" src="docs/images/sequence-light.png" width="100%">
     </picture>
   </a>
   <br>
-  <sub><i>Click the diagram to open it full-size — browser native pan + zoom.</i></sub>
+  <sub><i>Click to open the raw PNG at full resolution — browser native pan + Cmd/Ctrl+scroll zoom. (GitHub README has no built-in lightbox.)</i></sub>
 </p>
 
 ### 3. Detailed flowchart
 
 <details>
-<summary><b>Full control-flow graph (click to expand — image is clickable for full-size)</b></summary>
+<summary><b>Full control-flow graph (click to expand)</b></summary>
 
 <p align="center">
-  <a href="docs/images/flowchart-dark.svg" title="Click to open full-size (pan + zoom in your browser)">
+  <a href="https://raw.githubusercontent.com/AlwaysAnticheat/A64SlotInstrument/main/docs/images/flowchart-dark.png">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/images/flowchart-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/images/flowchart-light.svg">
-      <img alt="Full control-flow graph" src="docs/images/flowchart-light.svg" width="70%">
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/flowchart-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/images/flowchart-light.png">
+      <img alt="Full control-flow graph" src="docs/images/flowchart-light.png" width="70%">
     </picture>
   </a>
 </p>
